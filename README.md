@@ -61,5 +61,6 @@ sample data and start reading the hosted PDFs.
 
 If you're hungry for the R version:
 
+```{r}
+devtools::install_github("datavores/vgsample")
 ```
-devtools::install_github("")
