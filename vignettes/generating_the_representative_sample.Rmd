@@ -1,0 +1,333 @@
+---
+title: "Generating the Representative Sample"
+author: "Brian Waismeyer"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Generating the Representative Sample}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+This document walks through the code and logic used to generate a random sample 
+of video games - stratified by year - from our video game population.
+
+There are a number of ways to approach stratified sampling (e.g., see 
+[here](http://stattrek.com/survey-research/stratified-sampling.aspx) for a 
+summary of a few). Our objective is to generate a sample that allows us to 
+estimate how specific features of video games have changed year-by-year. 
+Additionally, as we'll see below, starting in the 1980s the number of games 
+released (that we have records for) is surprisingly conistent.
+
+Our obective and the nature of the data lend themselves well to fixed-sample 
+stratified sampling. This approach can be problematic if the strata vary wildly 
+in size and/or the variability of their contents. However, given the size of our
+later strata, proportionate sampling would not have a large impact on many of
+our strata sizes.
+
+## Prepare the Workspace
+
+We start by loading supporting packages and setting desired global options.
+
+```{r prepare_workspace}
+# Load supporting packages.
+library(dplyr)          # Data manipulation.
+library(tidyr)          # Data manipulation.
+library(stringr)        # String maniuplation.
+library(ggplot2)        # Data visualization.
+```
+
+To keep the later portions of the document concise, we also define our custom
+helper functions here. Functions are presented in the order they are called.
+
+```{r define_helper_functions}
+# Generate the index for a stratified random sample.
+#
+# This function handles our stratified random sampling. It differs from other
+# such sampling functions in that it can tolerate strata smaller than the fixed
+# sample size while still sampling without replacement.
+#
+# @param df The dataframe the function will build an index for.
+# @param strat_col A string naming the column the function will use for
+#   stratification.
+# @param sample_size Integer indicating the size of the sample to draw from
+#   each stratum.
+#
+# @returns
+#   Returns an index as a vector that can be used to subset the target dataframe
+#   to generate the stratified random sample.
+sample_strata <- function(df, strat_col, sample_size) {
+    # Insure the formatting of the dataframe.
+    df <- as.data.frame(df)
+    
+    # Define the bucket for values we'll be indexing.
+    sample_index <- c()
+    
+    # Capture the unique strata values.
+    strata <- sort(unique(df[, strat_col]), 
+                   # A subtle little move - we retain our NAs and put them at the
+                   # end of our unique list.
+                   na.last = TRUE)
+    
+    # Sample from the strata.
+    for(stratum in strata) {
+        # Observe which records are associated with the strata. This is
+        # structured to handle NAs.
+        stratum_index <- which(df[, strat_col] %in% stratum)
+        
+        # Test if sufficiently large to sample from.
+        if(length(stratum_index) <= sample_size) {
+            # If too small, simply capture the indices for all of the records.
+            sample_index <- c(sample_index, stratum_index)
+        } else {
+            # Otherwise, sample and capture sample_size records without 
+            # replacement.
+            random_index <- sample(stratum_index, sample_size, replace = FALSE)
+            
+            sample_index <- c(sample_index, random_index)
+        }
+    }
+    
+    # Return the sampled records.
+    return(sample_index)
+}
+```
+
+Finally, we load the dataframe we will be sampling from.
+
+```{r load_merge_dfs}
+# Load the video game "population" dataframe.
+load("./merge_final_df.Rds")
+```
+
+## Generating the Stratified Sample
+
+As noted above, we will be aiming to sample a fixed number of games from our 
+"game population" per release year. We can think of this sample from two 
+perspectives: as a sample from each year or as a single stratified sample.
+
+The fixed size we choose will represent our individual year sample size. The 
+collective, stratified sample is our representation of the entire population. We
+will choose our fixed strata sample size to product a population sample size of
+about 2500 games (~ 2.5% of the total population).
+
+Where there are fewer games in a stratum than our fixed sample size, we will
+simply sample the entire stratum.
+
+Our data includes games from `r length(unique(final_df$first_release_year))`
+years. For a naive estimate, we simply divide our target size by our number of
+strata: 2500 /`r length(unique(final_df$first_release_year))` =
+`r 2500 / length(unique(final_df$first_release_year))`. Of course, a number of
+our early strata will have fewer games than our naive estimate, so we bump that
+up slightly so that we sample more from our larger strata.
+
+```{r sample_generation}
+# Set the random sample seed (so that people can track how the current sample
+# in particular was developed).
+set.seed(2016)
+
+# Generate a sample index, fully sampling those strata which are smaller than 
+# the target stratum sample size.
+strat_sample_index <- sample_strata(final_df, "first_release_year", 60)
+
+# Extract our represenative sample records.
+strat_sample_df <- final_df[strat_sample_index, ]
+
+# Inspect the sample structure.
+str(strat_sample_df)
+
+# Inspect the sample by release year.
+strat_sample_df %>%
+    group_by(first_release_year) %>%
+    summarise(count = n()) %>%
+    data.frame()
+```
+
+We see that our early release years often have less than our target stratum 
+sample size. However, from 1977 onwards at least 60 games were released per year
+(including those games which do not have a properly recorded release year).
+
+## Inspecting the Sample for Duplicates
+
+Although we took great pains to remove duplicates from our game population, the 
+truth is that we likely missed a few. The sample records were sorted by game 
+title and inspected manually for duplicate entries. Duplicates are removed below
+and replaced with a new randomly drawn title. The observed duplicate rate is
+then used to estimate the rate and number of duplicates in the game population.
+
+```{r replacing_duplicates}
+# A sorted version of the representative sample to use during manual duplicate
+# inspection.
+sdf <- strat_sample_df %>%
+    arrange(title) %>%
+    select(title, first_release_year) %>%
+    data.frame()
+
+# Example of alphabetical inspection.
+# sdf[1:100, ]
+
+# Code use to generate similar string sets.
+# sdf_dup_candidates <- fuzzy_match_all(sdf$title, remove_matches = TRUE,
+#                                       max_dist = .2)
+# not_na <- sapply(sdf_dup_candidates, function(x) {
+#     is.na(x[[1]])
+# })
+# sdf_dup_candidates[not_na]
+
+# Entries identified as duplicates. The selection was based initially on entry 
+# quality. If quality was identical, it was based on whichever had an earlier 
+# index.
+
+# NOTE: I spell out the titles here largely for reader convenience. I actually
+# use the list names (the sdf index values) to do the matching in case there are
+# special characters in the title (e.g., Shui Hu Zhuan has special characters
+# that can't be produced easily on an English system).
+duplicates <- list(
+    "69" = "Air Raid!",     
+    "164" = "Asteroid",     
+    "462" = "CORE: Cybernetic Organism Recovery Expedition",
+    "498" = "Cross Channel",
+    "1053" = "Intercepter",
+    "1634" = "Ping-Pong",    
+    "1930" = "Shui Hu Zhuàn",
+    "2014" = "Space War",
+    "2430" = "TV School House 2",
+    "2489" = "Videocart 1: Tic Tac Toe: Shooting Gallery: Doodle: Quadradoodle",
+    "2490" = "Videocart 10: Maze",
+    "2492" = "Videocart 2: Desert Fox: Shooting Gallery",
+    "2496" = "Videocart 7",
+    "2575" = "Worm!",
+    "2078" = "StarFox Command",
+    "2281" = "The Fairly OddParents: Breakin' Da Rules",
+    "2615" = "YuYu Hakusho"
+)
+
+duplicate_names <- sdf$title[as.integer(names(duplicates))]
+
+# Now we flag the duplicates in both our sample dataframe and the game 
+# population dataframe.
+strat_sample_df$is_duplicate <- ifelse(strat_sample_df$title %in% 
+                                           duplicate_names,
+                                       TRUE,
+                                       FALSE)
+
+final_df$is_duplicate <- ifelse(final_df$title %in% 
+                                    duplicate_names,
+                                TRUE,
+                                FALSE)
+
+# And we flag which games have already been sampled in game population 
+# dataframe.
+final_df$is_sampled <- ifelse(final_df$title %in% strat_sample_df$title,
+                              TRUE,
+                              FALSE)
+
+# Next we calculate our observed duplicate rate and confidence intervals.
+duplication_rate <- length(duplicate_names) / nrow(strat_sample_df)
+
+# Assuming that the distribution for sampled duplicate error rates is normally
+# distributed, we estimate the actual rate of error in the game population.
+
+# Calculate the standard error for a proportion.
+ste_duplications <- sqrt(
+    (duplication_rate * (1 - duplication_rate)) / 
+        nrow(strat_sample_df)
+)
+
+# Select our confidence interval and its associated Z.
+conf_z <- 1.96      # For 95% conf interval.
+
+dup_rate_conf_size <- conf_z * ste_duplications
+
+# State the results.
+sprintf("Estimated rate of duplicates is %s (+/- %s).",
+        round(duplication_rate, 3), round(dup_rate_conf_size, 3))
+sprintf("Estimated number of duplicates (out of %s) is %s (+/- %s).",
+        nrow(final_df), 
+        round(nrow(final_df) * duplication_rate),
+        round(nrow(final_df) * dup_rate_conf_size))
+
+# Remove current intermediate values.
+rm(conf_z, dup_rate_conf_size, duplicate_names, duplication_rate, 
+   duplicates)
+
+# Next we calculate how many games for each stratum need to be replaced.
+strat_counts <- strat_sample_df %>%
+    group_by(first_release_year) %>%
+    summarise(games_to_replace = sum(is_duplicate)) %>%
+    filter(games_to_replace > 0)
+
+# We randomly sample an appropriate number of new records from each stratum, 
+# ignoring games that have already been sampled. If all records in a statum have
+# already been sampled, we get an NA and accept that we'll be shrinking that
+# stratum.
+strat_sample_index <- unlist(sapply(1:nrow(strat_counts), function(x) {
+    current_year <- strat_counts$first_release_year[x]
+    sample_size <- strat_counts$games_to_replace[x]
+    
+    stratum_index <- which((final_df$first_release_year %in% current_year) &
+                               (!final_df$is_sampled))
+    
+    if(length(stratum_index) == 0) {
+        return(NA)
+    }
+    
+    sample_index <- sample(stratum_index, sample_size, replace = FALSE)
+    
+    return(sample_index)
+}))
+
+# We do a manual review of the newly sampled items to see if any of them in turn
+# need replacement. None were identified as duplicates in the current sample
+replacement_df <- final_df[strat_sample_index, ]
+
+replacement_df %>%
+    select(title, first_release_year)
+
+replacement_df$is_duplicate <- FALSE
+strat_sample_df$is_sampled <- TRUE
+
+# Add the replacements to the sample.
+strat_sample_df <- rbind(strat_sample_df, replacement_df)
+
+# Drop the duplicates and any junk entries.
+strat_sample_df <- strat_sample_df %>%
+    filter(!is_duplicate,
+           !is.na(title))
+```
+
+```{r first_pass_assignments}
+# Create a version of the dataframe for use during first pass inspections of
+# game records.
+
+# First we select a target platform.
+strat_sample_df$target_platform  <- sapply(
+    strat_sample_df$platform, function(current_value) {
+        if(!grepl("----", current_value)) {
+            return(current_value)
+        }
+        
+        value_set <- unlist(str_split(current_value, "----"))
+        
+        current_value <- sample(value_set, 1)
+        
+        return(current_value)        
+}, USE.NAMES = FALSE)
+
+# Then we make a composite column for copy-pasting into the survey.
+strat_sample_df <- strat_sample_df %>%
+    mutate(copy_col = str_c(str_replace_na(title), 
+                            str_replace_na(first_release_year),
+                            str_replace_na(target_platform),
+                            sep = "----"))
+
+# Then we divvy the table up into four parts and give these to team members.
+strat_sample_df$reviewer <- c("Brian", "Kameron", "Kate", "Sam")
+
+# Finally, we reorganize the results slightly for reviewer convenience.
+strat_sample_df <- strat_sample_df %>%
+    select(copy_col, reviewer, everything())
+
+# We save the results for distriubtion to the team.
+write.csv(strat_sample_df, file = "rep_sample_for_review.csv")
+```

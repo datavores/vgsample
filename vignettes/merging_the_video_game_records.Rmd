@@ -1,0 +1,312 @@
+---
+title: "Merging the Video Game Records"
+author: "Brian Waismeyer"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Merging the Video Game Records}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+This document covers the details of how the video game records from our target 
+database are merged. It starts by loading "merge ready" dataframes of records 
+for each source and completes with a merged dataframe.
+
+The target sources:
+
+* UVList (retrieved 2/1/2016)
+* Giantbomb (retrieved 2/3/2016)
+* MobyGames [not yet implemented]
+* AllGames [not yet implemented]
+
+For details on how the records were obtained and cleaned, see the relevant 
+scraping and cleaning documents.
+
+**Note**: If run, this document assumes certain resources (e.g., the Giantbomb
+raw data .Rds) are available in the local working directory.
+
+## Prepare the Workspace
+
+We start by loading supporting packages and setting desired global options.
+
+```{r prepare_workspace}
+# Load supporting packages.
+library(dplyr)          # Data manipulation.
+library(tidyr)          # Data manipulation.
+library(lubridate)      # Date manipulation.
+library(stringr)        # String manipulation.
+library(stringdist)     # Fuzzy string matching.
+
+# Set document globals.
+run_from_scratch <- TRUE
+```
+
+To keep the later portions of the document concise, we also define our custom
+helper functions here. Functions are presented in the order they are called.
+
+```{r define_helper_functions}
+source("./cleaning_functions.R")
+```
+
+Finally, we load the merge-ready dataframes.
+
+```{r load_merge_dfs}
+# Load the dataframes prepared for merging for each target source.
+load("./uv_merge_df.Rds")
+load("./gb_merge_df.Rds")
+
+# If not running from scratch, we also load all other intermediate products 
+# produced by the code in this document.
+if(!run_from_scratch) {
+    load("./merge_intermediate_products.Rds")
+}
+```
+
+## The Raw Merge
+
+Our first step is going to be simply combining our dataframes together. We'll 
+start by stripping the dataframes of their unique headers and unshared columns. 
+Then we'll assign each game an index that can be linked back to their source
+dataframe. Then we'll bind the dataframes together in preparation for rolling
+them up to merge their shared titles.
+
+```{r raw_merge}
+# Add a source index column.
+uv_merge_df$source_index <- c(1:nrow(uv_merge_df))
+gb_merge_df$source_index <- c(1:nrow(gb_merge_df))
+
+# Make fresh copies of each dataframe, stripping the source header.
+uv_df <- uv_merge_df
+names(uv_df) <- gsub("uv_", "", names(uv_df))
+
+gb_df <- gb_merge_df
+names(gb_df) <- gsub("gb_", "", names(gb_df))
+
+# Identify and select the shared columns.
+shared_cols <- names(uv_df) %in% names(gb_df)
+shared_cols <- names(uv_df)[shared_cols]
+
+uv_df <- uv_df[, shared_cols]    
+gb_df <- gb_df[, shared_cols]
+
+# Give the source columns unique names.
+uv_df <- rename(uv_df, uv_index = source_index)
+gb_df <- rename(gb_df, gb_index = source_index)
+
+# Bind the dataframes.
+m_df <- bind_rows(uv_df, gb_df)
+```
+
+## The Raw Rollup
+
+Next we do our first rollup. This rollup is made on the basis that duplicates 
+will share identical flat names. For our shared fields, we apply a function that
+merges and sorts the contents of the fields (e.g., if flat_platform for game A 
+is nes-snes and for its duplicate B is nes----sega, the function will merge 
+these to create nes----sega----snes).
+
+```{r raw_rollup}
+# We do a quick and dirty rollup of the raw records, sorting and deduplicating 
+# complex fields as they get merged and coalescing our index columns (so that 
+# whichever merged record has a non-NA value has that value retained).
+if(run_from_scratch) {
+    mr_df <- m_df %>%
+        mutate(
+            uv_title = ifelse(!is.na(uv_index), title, NA),
+            gb_title = ifelse(!is.na(gb_index), title, NA)
+        ) %>%
+        group_by(flat_title) %>%
+        summarise(
+            uv_title = sort_elements(uv_title),
+            gb_title = sort_elements(gb_title),
+            platform = sort_elements(platform),
+            flat_platform = sort_elements(flat_platform),
+            first_release_year = min(first_release_year, na.rm = TRUE),
+            all_release_year = sort_elements(all_release_year),
+            uv_index = sort_elements(uv_index),
+            gb_index = sort_elements(gb_index)
+        ) %>%
+        ungroup() %>%
+        mutate(
+            uv_index = as.integer(uv_index),
+            gb_index = as.integer(gb_index)
+        )
+    
+    mr_df <- mr_df %>%
+        mutate(
+            uv_title = gsub("(?<=.)----.*$|^----", "", uv_title, perl = TRUE),
+            gb_title = gsub("(?<=.)----.*$|^----", "", gb_title, perl = TRUE),
+            uv_title = ifelse(uv_title == "",
+                              NA,
+                              uv_title),
+            gb_title = ifelse(gb_title == "",
+                              NA,
+                              gb_title),
+            title = ifelse(is.na(gb_title),
+                           uv_title,
+                           gb_title)
+        ) %>%
+        filter(!is.na(title))
+}
+```
+
+## Deduplicating the Raw Rollup
+
+Our merge currently relies on exact matches between title entries across our 
+sources. This is not a great assumption so we also employ our deduplication 
+logic on our already flattened/standardized titles to attempt to identify 
+cross-source duplicates.
+
+### Identify Variation/Mispelling Candidates
+
+```{r id_variation_candidates}
+# This section handles identifying candidates for variations and mispellings. It
+# is recommended that you only trigger this section if you are certain it is 
+# necessary and know what you are doing as it is time-consuming.
+if(run_from_scratch) {
+    # First we look for variations/mispellings in our titles. This is the most
+    # time-consuming of the variation processing. We save some processing by
+    # focusing only on unique values (removing obvious duplicates from
+    # consideration).
+    unique_titles <- unique(mr_df$flat_title)
+    
+    title_matches <- fuzzy_match_all(unique_titles, max_dist = 0.1,
+                                     skip_pure_digit = TRUE, 
+                                     min_test_length = 3,
+                                     assume_unique = TRUE, 
+                                     remove_matches = TRUE)
+    
+    # We repeat for our systems producers...
+    
+    # Developers...
+    
+    # And platforms...
+    unique_platforms <- str_split(mr_df$flat_platform, "----")
+    unique_platforms <- unique(do.call(c, unique_platforms))
+    
+    platform_matches <- fuzzy_match_all(unique_platforms, max_dist = 0.1,
+                                        skip_pure_digit = TRUE, 
+                                        min_test_length = 2,
+                                        assume_unique = TRUE, 
+                                        remove_matches = TRUE)
+
+    # Remove intermediate data products.
+    rm(unique_titles, unique_platforms)
+}
+```
+
+### Process Variation/Mispelling Candidates
+
+We now have a set of lists that identify terms that appear to be reasonable 
+candidates for having variations/mispellings along with the associated candidate
+variations/mispellings. We use a helper function to walk-through our target 
+source--match sets and apply some basic logic to auto-assess for match validity.
+See the definition for the `resolve_match` to observe the rules determing what
+counts as a match or not.
+
+**NOTE**: The `resolve_variations_from_scratch` global gets assessed in this
+section. If set to `TRUE`, this section can take some time to complete.
+
+```{r process_variation_candidates}
+# This section handles processing candidates for variations and mispellings. It
+# is recommended that you only trigger this section if you are certain it is 
+# necessary and know what you are doing as it is time-consuming.
+if(run_from_scratch) {
+    # We run our auto-resolver on each of the collections.
+    auto_title_matches <- resolve_all_match_sets(title_matches)
+    auto_platform_matches <- resolve_all_match_sets(platform_matches)
+}
+```
+
+### Clean Identified Variation/Mispelling Pairs
+
+At this point we've produced some objects that could either be subjected to 
+manual processing (to resolve uncertain candidate matches) or which can be used
+to guide standardization of variation/mispelling collections as-is. For this 
+project, we simply use the current auto-matched results and acknowledge that 
+we've likely missed a few matches.
+
+It's worth noting that we've done our matching with a highly stripped down 
+version of our values (certain punctuation and casing removed). We'll use the 
+results of matching these values to replace our richer-formatting titles as 
+well, but we'll retain the original raw versions to allow us to spot check for 
+errors if the need arises.
+
+```{r apply_variation_candidates}
+if(run_from_scratch) {
+    ## titles ##
+    fix_titles <- auto_title_matches$match_set_list
+    fix_titles <- fix_titles[auto_title_matches$auto_accept_index]
+    
+    mc_df <- fix_all_match_sets(fix_titles, data.frame(mr_df), 
+                                "title", "flat_title")
+    
+    # fix_platforms <- auto_platform_matches$match_set_list
+    # fix_platforms <- fix_platforms[auto_platform_matches$auto_accept_index]
+    # 
+    # mc_df <- fix_all_match_sets(fix_platforms, mc_df, 
+    #                             "platform", "flat_platform")
+    
+    ## cleanup ##
+    rm(fix_titles)
+}
+```
+
+## Rollup to Final Records and Join to Get Source Details
+
+```{r final_rollup_join}
+final_df <- mc_df %>%
+    group_by(flat_title) %>%
+    summarise(
+        title = sort_elements(title),
+        uv_title = sort_elements(uv_title),
+        gb_title = sort_elements(gb_title),
+        platform = sort_elements(platform),
+        flat_platform = sort_elements(flat_platform),
+        first_release_year = min(first_release_year, na.rm = TRUE),
+        all_release_year = sort_elements(all_release_year),
+        uv_index = sort_elements(uv_index),
+        gb_index = sort_elements(gb_index)
+    ) %>%
+    ungroup() %>%
+    # It's possible that our duplicate removing has created some rolled up 
+    # records associated with multiple source table indexes. Where this occurs,
+    # we arbitrarily drop all but the first observed index.
+    mutate(
+        uv_index = gsub("----.*$", "", uv_index),
+        gb_index = gsub("----.*$", "", gb_index),
+        uv_index = as.integer(uv_index),
+        gb_index = as.integer(gb_index)
+        )
+
+final_df <- final_df %>%
+    left_join(select(uv_merge_df, source_index, uv_raw_title, uv_publisher,
+                     uv_developer, uv_platform, uv_first_release_year),
+              by = c("uv_index" = "source_index")
+              ) %>%
+    left_join(select(gb_merge_df, source_index, gb_raw_title, gb_platform,
+                     gb_first_release_year),
+              by = c("gb_index" = "source_index")
+              ) %>%
+    select(
+        # Core features.
+        title, flat_title, 
+        first_release_year, all_release_year, 
+        platform, flat_platform,
+        # UVList records.
+        uv_index, uv_title, uv_raw_title, uv_first_release_year,
+        uv_publisher, uv_developer, uv_platform,
+        # Giantbomb records.
+        gb_index, gb_title, gb_raw_title, gb_first_release_year,
+        gb_platform)
+
+# If run from scratch, we save the key intermediate and final data products.
+if(run_from_scratch) {
+    save(mr_df, title_matches, platform_matches, auto_title_matches,
+         auto_platform_matches, mc_df,
+         file = "./merge_intermediate_products.Rds")
+    
+    save(final_df, file = "./merge_final_df.Rds")
+}
+```
