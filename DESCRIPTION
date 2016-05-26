@@ -1,0 +1,37 @@
+Package: vgsample
+Type: Package
+Title: A Representative Sample of Video Games
+Version: 0.1
+Date: 2016-05-26
+Authors@R: c(person("Waismeyer", "Brian", role = c("aut", "cre"),
+					email = "bwaismeyer@gmail.com"),
+			 person("Coulter", "Sam", role = "ctb",
+					email = "coulter.samantha@gmail.com"),
+			 person("So", "Kameron", role = "ctb",
+					email = "kamrons@gmail.com"),
+			 person("Sousa", "Kate", role = "ctb",
+			        email = "Ktevelynsousa@gmail.com")
+			)
+Description: This package provides a representative sample of video games
+    stratified by first release year. It also includes the code used to produce
+    the sample along with descriptions of the data sources our team drew from,
+    our cleaning and sampling processes, and our rationale. In summary, our team
+    aggregrated four major public libraries of game data (GiantBomb, UVList,
+    MobyGames, and the now-defunct AllGames) and extracted a random sample of
+    games from each year of game data based on each game's initial release year.
+    This sample is designed to assist all parties interested in studying trends
+    in video games over time by providing a clean, manageable collection of
+    games to study which can be used to make inferences about the larger game
+    population.
+Depends:
+    R (>= 3.2.5)
+Imports:
+    dplyr
+License: 
+LazyData: TRUE
+URL: 
+BugReports: 
+RoxygenNote: 5.0.1
+Suggests: knitr,
+    rmarkdown
+VignetteBuilder: knitr

@@ -1,0 +1,720 @@
+---
+title: "Giantbomb Data Cleaning"
+author: "Brian Waismeyer"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Giantbomb Data Cleaning}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+This document covers the details of how the API-retrieved Giantbomb records are
+processed for merging. It starts by loading the raw API data (see the Giantbomb
+Data Scraping document for details) and concludes with Giantbomb records in the
+desired structure for merging.
+
+The Giantbomb data were retrieved on 2/3/2016 and consist of all the game 
+records available on the Giantbomb API at that time.
+
+**Note**: Carefully observe the globals (e.g.,`id_variations_from_scratch`) in 
+the opening code below. The major processes underlying the identification of 
+value mispellings/variations in the game records (especially the game titles) 
+are _very_ lengthy (up to several hours) and resolving identified assocations is
+often best informed by some additional manual interaction with the data to 
+assess if new auto-resolve rules are appropriate. Unless you are very certain 
+the data need to be re-processed, it is suggested that you keep globals at their
+defaults and work with the intermediate data products loaded into the workspace.
+
+**Note**: If run, this document assumes certain resources (e.g., the Giantbomb
+raw data .Rds) are available in the local working directory.
+
+## Prepare the Workspace
+
+We start by loading supporting packages and setting desired global options.
+
+```{r prepare_workspace}
+# Load supporting packages.
+library(dplyr)          # Data manipulation.
+library(lubridate)      # Date manipulation.
+library(stringr)        # String manipulation.
+library(stringdist)     # Fuzzy string matching.
+
+# Set document globals.
+run_from_scratch <- FALSE
+```
+
+To keep the later portions of the document concise, we also define our custom
+helper functions here. Functions are presented in the order they are called.
+
+```{r define_helper_functions}
+source("./cleaning_functions.R")
+```
+
+Finally, we load the raw Giantbomb data.
+
+```{r load_raw_data}
+# Load the raw results of the Giantbomb scraping script. This is a list of game
+# dataframes with the size of each dataframe primarily determined by the limits
+# set by the Giantbomb API.
+load("./giantbomb_raw.Rds")
+
+# If not running from scratch, we also load all other intermediate products 
+# produced by the code in this document.
+if(!run_from_scratch) {
+    load("./giantbomb_intermediate_products.Rds")
+}
+```
+
+## Create the Raw Dataframe
+
+The Giantbomb data arrives as a list of dataframes, each retrieved from a single
+query to the Giantbomb API. Each dataframe is a collection of game records. Our
+first step will be collapsing these into a single dataframe.
+
+```{r create_raw_df}
+# Retrieve the dataframe collection.
+df_collection <- gb_raw_collection
+
+# Test for empty dataframes.
+row_counts <- sapply(df_collection, nrow)
+
+# Drop dataframe(s) with 0 rows. This should only occur if we accidentally made
+# a query for a non-existent range of games (shouldn't happen but eh).
+df_collection <- df_collection[!(row_counts == 0)]
+
+# Collapse the results to a single dataframe.
+gb_raw_df <- as.data.frame(rbind_all(df_collection), stringsAsFactors = FALSE)
+
+# Clean intermediate products from our workspace.
+rm(gb_raw_collection, df_collection, row_counts)
+
+# Make a fresh dataframe copy to work with in case we need to appeal to the
+# original.
+gb_df <- gb_raw_df
+```
+
+## Inspection
+
+In this section we do some spot checking of the data to get a sense of the 
+contents of each column and to look for obvious fixes.
+
+```{r inspection}
+# We check the column types and notice an immediate issue.
+typeof(gb_df$id)
+typeof(gb_df$name)
+typeof(gb_df$original_release_date)
+typeof(gb_df$platforms)
+
+# Take a closer look at platforms.
+str(gb_df$platforms[1])
+
+# Platforms is a column of dataframes - an undesirable complexity in our
+# dataframe that we'll need to address.
+
+# Take a closer look at the structure of the other columns.
+str(gb_df[, -4])
+
+# And the print behavior of the title column.
+print(head(gb_df$name, 15))
+
+# Get a sense for the number of levels in our features. 
+apply(gb_df[, -4], 2, function(x) length(unique(x)))
+apply(gb_df[, -4], 2, function(x) sum(is.na(x)))
+```
+
+Some observations:
+
+* At least at first glance, the fields appear to be tidy and there are no 
+obvious signs of duplication in our name field.
+
+* The platforms field needs to be collapsed into more standard columns before we
+can really get a sense of what's in it.
+
+* The release date field has more information than we really want. We need to
+make it a proper date-type column and extract year from it.
+
+We do some quick global cleaning before we proceed to the dirty work.
+
+```{r first_pass_global_cleaning}
+# First things first, we need to simplify the platforms field. We extract the 
+# long and short platform names for each game and then collapse them to single 
+# fields.
+plat_df <- lapply(gb_df$platforms, function(x) {
+    platform_full <- paste(x$name, collapse = "----")
+    platform <- paste(x$abbreviation, collapse = "----")
+    
+    results <- data.frame(
+        "platform_full" = platform_full,
+        "platform" = platform,
+        stringsAsFactors = FALSE
+    )
+    
+    return(results)
+})
+
+plat_df <- bind_rows(plat_df)
+
+# We inspect the unique values in each column to assess if there are obvious NAs
+# we should clean out.
+unique_plats <- unlist(sapply(plat_df$platform, function(x) {
+    return(unlist(str_split(x, "----")))
+}, USE.NAMES = FALSE))
+unique_plats <- unique(unique_plats)
+
+table(unique_plats)
+
+# The only obvious indicator of "NA" is the empty string "". We set these to NA
+# where we find them.
+plat_df$platform[plat_df$platform == ""] <- NA
+plat_df$platform_full[plat_df$platform_full == ""] <- NA
+
+# We update our game dataframe with the flat columns and drop the complex
+# column.
+gb_df <- select(gb_df, -platforms)
+gb_df <- cbind(gb_df, plat_df)
+
+# Clean-up the intermediate data products.
+rm(plat_df, unique_plats)
+
+# Column values (especially game titles) may look strange if the encoding is not
+# specified. We insure that they will be properly represented as UTF-8.
+Encoding(gb_df$name) <- "UTF-8"
+Encoding(gb_df$platform_full) <- "UTF-8"
+Encoding(gb_df$platform) <- "UTF-8"
+
+# Even though the Giantbomb data look very clean, we do take a few steps to 
+# insure the fields avoid accidental junk (noting again that platform was
+# cleaned when we extracted it).
+
+# First we clean any non-space space characters, remove any leading/trailing
+# spaces, and replace double+ spaces with single spaces.
+junk_regex <- "((?! )[[:space:]])|(\\((?! )[[:space:]]\\))"
+
+gb_df$name <- gsub(junk_regex, "", gb_df$name, perl = TRUE)
+gb_df$name <- str_trim(gb_df$name)
+gb_df$name <- gsub("[[:space:]]{2,}", " ", gb_df$name)
+
+rm(junk_regex)
+```
+
+## Identify and Clean NAs, Set Types
+
+At this point, we have columns that align with our target dataframe. We start 
+giving those columns a more thorough cleaning by standardizing how NAs are 
+expressed and insuring that column types are appropriate.
+
+```{r na_cleaning}
+# Checking for NAs and setting types is very straightforward as the data
+# quality is high for Giantbomb.
+
+## title ##
+# We simply inspect particularly short titles for NA patterns.
+short_uniques <- unique(gb_df$name)
+short_uniques <- short_uniques[nchar(short_uniques) < 4]
+sort(short_uniques)
+
+# There are some weird loking titles, but no obvious NAs.
+rm(short_uniques)
+
+## release date ##
+# Arrives as a character string. We start by converting this to a date type,
+# extracting year, and then simply inspect for unusual dates.
+gb_df$original_release_date <- ymd_hms(gb_df$original_release_date)
+gb_df$release_year <- year(gb_df$original_release_date)
+
+table(gb_df$release_year)
+
+# The earliest game that could be considered a "video" game was released in 1950
+# and few games were released prior to the 1970s. We inspect the particularly 
+# early games to see what is going.
+gb_df %>% 
+    filter(release_year < 1950) %>% 
+    select(name, release_year, platform_full) %>%
+    arrange(release_year)
+
+# It appears that a subset our games are not video games, but are instead 
+# pinball games. We drop these from our data.
+is_pinball <- grepl("Pinball", gb_df$platform_full)
+sum(is_pinball)
+
+gb_df <- gb_df[!is_pinball, ]
+
+rm(is_pinball)
+
+# We examine our early date games again.
+gb_df %>% 
+    filter(release_year < 1965) %>% 
+    select(name, release_year, platform_full) %>%
+    arrange(release_year)
+
+# All entries with release years before 1950 seem dubious. We set their date
+# fields to NA.
+is_early <- gb_df$release_year < 1950
+sum(is_early)
+
+gb_df$original_release_date[is_early] <- NA 
+gb_df$release_year[is_early] <- NA
+
+rm(is_early)
+
+## Platform ##
+# We cleaned these when we extracted them.
+```
+
+## Inspecting for String Mispellings and Variations
+
+Again, the Giantbomb data are in excellent condition. However, it definitely has
+some explicit duplicate titles - certainly more than one would expect given how
+rare it is for different games to share the same name. We are also going to 
+double check for game duplications resulting from game title
+mispellings/variations.
+
+Doing this type of cleaning completely requires some manual labor - at minimum
+we would need to do enough manual cleaning to train a model for a more automated
+solution. However, for the current project, we're going to automate what we can
+and - due to the sheer number of records - accept the risk of some duplications
+(and the loss of some games that happen to share the same title).
+
+We adopt a collection of strategies to to allow us to automate the removal of as
+many duplicates as possible.
+
+1. Creating a column version with standardized casing and common differences 
+removed (e.g., "007: Nightfire" v. "007 - Nightfire").
+
+2. First just examine unique values and not the entire record. In other words,
+don't worry about record duplication yet - just word about similarities among
+all the unique values in a single field (e.g., resolve similar titles alone).
+
+3. Automate the pairing of values with potential matches based on a simple 
+string similarity index. This allows us to identify smaller collections of term 
+v. match terms that we can process with more precise rules.
+
+4. Standardize how matched candidates are evaluated.  This allows us to specify 
+up front what the criteria are for an automated "match" (i.e., a potential 
+mispelling/variation) or "mismatch" (i.e., false positive based on similarity
+alone). If we ever choose to do the proper manual cleaning of values, this will 
+also minimize the manual work required.
+
+### Standardize Casing and Known Variations
+
+Based on experience with both the current data and titling in general, there are
+a few common sources of variation we can attempt to account for up front.
+
+* _Subtitles_: Catalogers vary a great deal as to whether they used " - " or 
+": " to indicate a subtitle. Sometimes unusual patterns (e.g., " -text- ") are
+also used to indicate subtitles, but we'll ignore these and simply take steps
+to make sure extra punctuation/spacing is ignored during our comparison stages.
+
+* _Hyphenation_: Whether or not a word is hyphenated (e.g., 2D v. 2-D) is also
+a regular source of variation. Hyphenation is too flexible for us to catch
+all cases of correct or incorrect hyphenation, but we can at least standardize
+some commonly abused cases.
+
+* _Common Shorthands_: We also keep an eye out for common shorthands that have
+variabile forms (e.g., vs, vs., versus). Where we see these, we choose a single
+form to adopt.
+
+* _Spacing_: Although we cleaned up leading/trailing spaces, it is possible for
+catalogers to inserted spaces into the title.
+
+* _Casing_: There are certaintly some games where the casing is part of the name
+(e.g., SiN). However, casing errors from human catalogers - especially for
+situations where casing is non-standard - are likely to be a recurring source of
+error. We'll compromise by having the comparison version of the column be all a
+single case.
+
+* _Roman and Written Numerals_: There are situations where coders chose to write
+numbers as Roman numerals (e.g., 2 as "II") and to write short numbers as words
+(e.g., 1 as "one"). Where possible, we want to standardize how numbers are
+presented. Unfortunately, written numerals can be used in some unpredictable
+ways, so we just focus on the Roman numeral to digit conversion.
+
+```{r variation_standardization}
+# Before we get started, we make new versions of the variables we'll be
+# tinkering with.
+gb_df$clean_name <- gb_df$name
+gb_df$clean_platform <- gb_df$platform
+gb_df$clean_platform_full <- gb_df$platform_full
+
+## Subtitles ##
+# Only really an issue for titles, so we ignore other fields during this
+# inspection.
+
+# Our ideal solution here is to convert either all ": " to " - " or vice versa.
+# When picking between the two, it seems cleaner to convert all to ": " (less
+# ambiguous) but we're more likely to succeed at converting all to " - "
+# (because we don't need to worry about identifying cases where " - " is not a
+# subtitle). We aim for the less ambiguous approach.
+
+# Key assumptions to this approach:
+# * ": " is always used to indicate a subtitle.
+# * " - " is always used to indicate a subtitle.
+# * There are no incorrect uses of ":" or "-" when indicating subtitles.
+
+# Secondary assumption:
+# * ": " and " - " don't have unique uses in the same string.
+
+# ": " used to indicate something other than a subtitle?
+head(grep(": ", unique(gb_df$clean_name), value = TRUE))
+# Result: None observed in the first few hundred entries.
+
+# " - " used to indicate something other than a subtitle?
+head(grep(" - ", unique(gb_df$clean_name), value = TRUE))
+# Result: Very few in titles and the only ones that were definitely problematic
+# to change were those in which a range of digits was being specified.
+
+# " - " used to indicate range of digits.
+length(grep("[[:digit:]] - [[:digit:]]", gb_df$clean_name, value = TRUE))
+grep("[[:digit:]] - [[:digit:]]", gb_df$clean_name, value = TRUE)
+# Result: We'll remove the spaces to disambiguate the problematic strings.
+
+titles_to_fix <- c("Historyline: 1914 - 1918", 
+                   "Mortyr (2093 - 1944)",
+                   "Super Yakyuudou '93 - 94 Nendo Data Kaiteiban")
+
+gb_df$clean_name <- sapply(gb_df$clean_name, function(x) {
+    if(x %in% titles_to_fix) {
+        return(gsub(" - ", "-", x))
+    } else {
+        return(x)
+    }
+}, USE.NAMES = FALSE)
+
+rm(titles_to_fix)
+
+# "-" used incorrectly or unusually?
+head(grep("[^ ]- | -[^ ]", unique(gb_df$clean_name), value = TRUE))
+# Result: Yes for titles. These fall into three cases - situations where "-" is
+# used to surround a word/phrase as a subtitle (e.g., "animals -puppy-"), where
+# "-" is doubled up, and where "-" just used wrong. We handle each.
+
+# Surround a word/phrase.
+gb_df$clean_name <- sapply(gb_df$clean_name, function(x) {
+    if(grepl("(^| )-[^ ].*-", x)) {
+        x <- sub(" -", ": ", x)
+        x <- gsub("(-(?= |$))|(^-)", "", x, perl = TRUE)
+        return(x)
+    } else {
+        return(x)
+    }
+}, USE.NAMES = FALSE)
+
+# Doubled up.
+gb_df$clean_name <- gsub("--", " - ", gb_df$clean_name)
+
+# Leading or trailing "-".
+gb_df$clean_name <- gsub(" -(?=[^ ])", ": ", gb_df$clean_name, perl = TRUE)
+gb_df$clean_name <- sapply(gb_df$clean_name, function(x) {
+    if(grepl("[^ ]- ", x, perl = TRUE)) {
+        return(gsub("- ", ": ", x))
+    } else {
+        return(x)
+    }
+}, USE.NAMES = FALSE)
+
+# ":" used incorrectly or unusually?
+grep(" :|[^ ]:[^ ]", unique(gb_df$clean_name), value = TRUE)
+# Result: Yes for titles. The problematic strings fall into three groups:
+# legitimate uses of ":" with digits, incorrect uses of ":" with characters, and
+# extra leading space " : ".
+
+gb_df$clean_name <- sapply(gb_df$clean_name, function(x) {
+    if(grepl(paste0("([[:alnum:]]:[[:alpha:]])",
+                    "|([[:alpha:]]:[[:alnum:]])",
+                    "|( : )|(::)|( :[^ ])"), x)) {
+        return(gsub("(:(?=[^ :]))|( : )|([ ]*::)|( :)", ": ", x, perl = TRUE))
+    } else {
+        return(x)
+    }
+}, USE.NAMES = FALSE)
+
+# Converting " - " to ": ".
+gb_df$clean_name <- gsub(" - ", ": ", gb_df$clean_name)
+
+## Hyphenation ##
+# This is also an issue we'll only really address in our title column. As noted
+# above, there are simply too many titles for us to correct all possible sources
+# of hyphenation. We simply scan for obvious variation issues and correct what
+# we can find.
+length(grep("[^ ]-[^ ]", gb_df$clean_name, value = TRUE))
+head(grep("[^ ]-[^ ]", gb_df$clean_name, value = TRUE), 100)
+
+# The most obvious problematic pattern is the shorthand for X-Dimensional (e.g.,
+# 2-D v. 2D v 2 D). We standardize these to remove the hyphenation.
+gb_df$clean_name <- sapply(gb_df$clean_name, function(x) {
+    if(grepl("([[:digit:]]-[Dd]( |$))", x)) {
+        return(gsub("-(?=([Dd] )|([Dd]$))", "", x, perl = TRUE))
+    } else {
+        return(x)
+    }
+}, USE.NAMES = FALSE)
+
+# Finally, we also have the problem of parens and brackets being used to either 
+# add text or as an alternative subtitle mechanism. Since we can't distinguish 
+# which is the case, we simply such parens/brackets where we observe them.
+bad_paren_index <- grepl("(^| )\\(.*?\\)(?= |$|;)", gb_df$clean_name, 
+                         perl = TRUE)
+bad_brack_index <- grepl("(^| )\\[.*?\\](?= |$|;)", gb_df$clean_name, 
+                         perl = TRUE)
+
+gb_df$clean_name <- sapply(1:length(gb_df$clean_name), function(x) {
+    current_name <- gb_df$clean_name[x]
+    
+    if(bad_paren_index[x]) {
+        current_name <- gsub("\\(|\\)", "", current_name)
+    }
+    
+    if(bad_brack_index[x]) {
+        current_name <- gsub("\\[|\\]", "", current_name)
+    }
+    
+    return(current_name)
+})
+
+rm(bad_paren_index, bad_brack_index)
+
+# In some cases, it is worth noting that parens were used to indicate working 
+# titles of uncertain games. Where this occurs, we simply build a flag to 
+# indicate uncertain title status and remove the added text from the name.
+gb_df$working_title <- grepl("working title", gb_df$clean_name, 
+                             ignore.case = TRUE)
+gb_df$clean_name <- gsub("working title", "", gb_df$clean_name, 
+                         ignore.case = TRUE)
+
+## Common Shorthands ##
+# We also try to standardize some other common patterns.
+# * vs, vs., versus
+gb_df$clean_name <- gsub("( vs )|( vs. )|( versus )", " vs ", gb_df$clean_name,
+                          ignore.case = TRUE)
+
+# * vol. , vol.
+gb_df$clean_name <- gsub("( vol )|( vol\\.)", " Volume ", gb_df$clean_name, 
+                          ignore.case = TRUE)
+
+# * no.
+gb_df$clean_name <- gsub("( no\\. )|( no\\.)|( no [[:digit:]](?=(:|$)))", 
+                          " Number ", 
+                          gb_df$clean_name, ignore.case = TRUE, perl = TRUE)
+
+# * ep
+gb_df$clean_name <- gsub("( ep\\.)|( ep [[:digit:]])", " Number ",
+                          gb_df$clean_name, ignore.case = TRUE)
+
+# * &
+gb_df$clean_name <- gsub("[^[:punct:]]&[^[:punct:]]", " and ", 
+                         gb_df$clean_name)
+
+## Spacing ##
+# This is one of our more straightforward cleaning steps. We simply don't allow
+# our strings to have more than a single space in them to remove accidental
+# multi-space sequences.
+gb_df$clean_name <- gsub("[ ]{2,}", " ", gb_df$clean_name)
+gb_df$clean_platform <- gsub("[ ]{2,}", " ", gb_df$clean_platform)
+gb_df$clean_platform_full <- gsub("[ ]{2,}", " ", gb_df$clean_platform_full)
+
+# And we insure that we introduced no new leading/trailing spaces with all our
+# fixing.
+gb_df$clean_name <- str_trim(gb_df$clean_name)
+gb_df$clean_platform <- str_trim(gb_df$clean_platform)
+gb_df$clean_platform_full <- str_trim(gb_df$clean_platform_full)
+
+## Casing ##
+# Finally, we make the decision to ignore casing for our observed values and we
+# enforce standard casing behavior on all our target fields. This is a jump from
+# the title cleaning we've been doing and it breaks potentially desirable
+# formatting. We do this work in a new column with the understanding that we'll
+# need to eventually need to choose a desired "natural" casing for each value.
+gb_df$flat_name <- str_to_lower(gb_df$clean_name)
+gb_df$flat_platform <- str_to_lower(gb_df$clean_platform)
+gb_df$flat_platform_full <- str_to_lower(gb_df$clean_platform_full)
+
+## Roman and Written Numerals ##
+# We convert all characters chunks likely to be Roman numerals. The Roman
+# numeral conversion will result in some false positives (e.g., puppy and i
+# becomes puppy and 1), but we accept these for the purpose of string matching.
+# We restrict this work to titles as the choice of a number format is more
+# likely to be intentional for publishers, developers, and platforms.
+
+# Roman numeral conversion. Roman numerals almost always occur at the end of a
+# title/subtitle, so we minimize false positives by only looking for matches 
+# indicating the end of a major title portion.
+numeral_range <- c(1:50)
+for(number in numeral_range) {
+    roman <- as.roman(number)
+    roman_regex <- paste0("(?<=[^[:alnum:]]|^)", 
+                          str_to_lower(roman), 
+                          "(?=[^[:alnum:]]|$)")
+    gb_df$flat_name <- gsub(roman_regex, as.character(number), 
+                            gb_df$flat_name, 
+                            perl = TRUE)
+}
+
+rm(number, numeral_range, roman, roman_regex)
+
+# Written numeral conversion. We create a vector of common words and a matching
+# vector of their numeric form.
+written_numerals <- c("zero", "one", "two", "three", "four", "five", "six",
+                      "seven", "eight", "nine", "ten", "eleven", "twelve",
+                      "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+                      "eighteen", "nineteen", "twenty", "thirty", "forty", 
+                      "fourty", "fifty", "sixty", "seventy", "eighty", "ninety")
+numeral_range <- c(0:20, 30, 40, 40, 50, 60, 70, 80, 90)
+for(index in 1:length(numeral_range)) {
+    written_regex <- paste0("(?<=[^[:alnum:]]|^)", 
+                            written_numerals[index], 
+                            "(?=[^[:alnum:]]|$)")
+    gb_df$flat_name <- gsub(written_regex, numeral_range[index], 
+                            gb_df$flat_name, 
+                            perl = TRUE)
+}
+
+rm(written_numerals, numeral_range, index, written_regex)
+
+```
+### Identify Variation/Mispelling Candidates
+
+**NOTE**: The `id_variations_from_scratch` global gets assessed in this section.
+If set to `TRUE`, this section will take up to several hours to identify 
+candidate associations and then (in the next section) resolve the candidate 
+associations.
+
+```{r id_variation_candidates}
+# This section handles identifying candidates for variations and mispellings. It
+# is recommended that you only trigger this section if you are certain it is 
+# necessary and know what you are doing as it is time-consuming.
+if(run_from_scratch) {
+    # First we look for variations/mispellings in our titles. This is the most
+    # time-consuming of the variation processing. We save some processing by
+    # focusing only on unique values (removing obvious duplicates from
+    # consideration).
+    unique_titles <- unique(gb_df$flat_name)
+    
+    title_matches <- fuzzy_match_all(unique_titles, max_dist = 0.1,
+                                     skip_pure_digit = TRUE, 
+                                     min_test_length = 3,
+                                     assume_unique = TRUE, 
+                                     remove_matches = TRUE)
+
+    # Remove intermediate data products.
+    rm(unique_titles)
+}
+```
+
+### Process Variation/Mispelling Candidates
+
+We now have a set of lists that identify terms that appear to be reasonable 
+candidates for having variations/mispellings along with the associated candidate
+variations/mispellings. We use a helper function to walk-through our target 
+source--match sets and apply some basic logic to auto-assess for match validity.
+See the definition for the `resolve_match` to observe the rules determing what
+counts as a match or not.
+
+**NOTE**: The `resolve_variations_from_scratch` global gets assessed in this
+section. If set to `TRUE`, this section can take some time to complete.
+
+```{r process_variation_candidates}
+# This section handles processing candidates for variations and mispellings. It
+# is recommended that you only trigger this section if you are certain it is 
+# necessary and know what you are doing as it is time-consuming.
+if(run_from_scratch) {
+    # We run our auto-resolver on each of the collections.
+    auto_title_matches <- resolve_all_match_sets(title_matches)
+}
+```
+
+### Clean Identified Variation/Mispelling Pairs
+
+At this point we've produced some objects that could either be subjected to 
+manual processing (to resolve uncertain candidate matches) or which can be used
+to guide standardization of variation/mispelling collections as-is. For this 
+project, we simply use the current auto-matched results and acknowledge that 
+we've likely missed a few matches.
+
+It's worth noting that we've done our matching with a highly stripped down 
+version of our values (certain punctuation and casing removed). We'll use the 
+results of matching these values to replace our richer-formatting titles as 
+well, but we'll retain the original raw versions to allow us to spot check for 
+errors if the need arises.
+
+```{r apply_variation_candidates}
+if(run_from_scratch) {
+    ## titles ##
+    fix_titles <- auto_title_matches$match_set_list
+    fix_titles <- fix_titles[auto_title_matches$auto_accept_index]
+    
+    clean_gb_df <- fix_all_match_sets(fix_titles, gb_df, 
+                                      "clean_name", "flat_name")
+    
+    ## cleanup ##
+    rm(fix_titles)
+}
+```
+
+## Roll Up to One Record per Game
+
+Giantbomb is intended to be a one-record per game database, but we've found a 
+few duplicates tucked into the otherwise lovely data. We roll up on title to 
+remove these duplicates.
+
+We'll allow our other fields to initially become more complex, concatenating 
+them together. During this concatenation, we'll also sort the elements and 
+remove duplicates in the complex fields.
+
+```{r roll_up}
+if(run_from_scratch) {
+    # And another version by title alone.
+    g_df <- clean_gb_df %>%
+        group_by(flat_title = flat_name) %>%
+        summarise(
+            title = sort_elements(clean_name),
+            platform = sort_elements(clean_platform),
+            min_year = min(release_year, na.rm = TRUE),
+            max_year = max(release_year, na.rm = TRUE),
+            release_year = sort_elements(release_year),
+            plat_test = sort_elements(flat_platform, dedup = FALSE,
+                                      cf_split = "~~~~"),
+            ry_test = sort_elements(release_year, dedup = FALSE,
+                                    cf_split = "~~~~"),
+            flat_platform = sort_elements(flat_platform),
+            raw_title = sort_elements(name),
+            id = sort_elements(id)
+        ) %>%
+        ungroup() %>%
+        mutate(max_min_gap = max_year - min_year,
+               njoins = nchar(gsub("[^-]", "", release_year)) / 4)
+    
+    # We inspect the list for instances where the roll-up seems like it may be
+    # problematic: roll-ups that pulled together records with very different
+    # release years.
+    table(g_df$max_min_gap, useNA = "ifany")
+}
+```
+
+## Finalize the Dataframe
+
+At this point, we have all the pieces we want for our merge-ready dataframe. We
+pull out the key columns and save the result.
+
+```{r merge_ready_df}
+# Select our target columns and create the merge-ready dataframe.
+gb_merge_df <- g_df %>%
+    select(
+        # Core features.
+        title, platform, first_release_year = min_year,
+        # Merge friendly versions of character features.
+        flat_title, flat_platform,
+        # Additional useful Giantbomb features.
+        id, raw_title, all_release_year = release_year)
+
+# Add a prefix so that columns are not lost accidentally during the merge.
+names(gb_merge_df) <- paste0("gb_", names(gb_merge_df))
+
+# If run from scratch, we save the key intermediate and final data products.
+if(run_from_scratch) {
+    save(title_matches, auto_title_matches, g_df,
+         file = "./giantbomb_intermediate_products.Rds")
+    
+    save(gb_merge_df, file = "./gb_merge_df.Rds")
+}
+```

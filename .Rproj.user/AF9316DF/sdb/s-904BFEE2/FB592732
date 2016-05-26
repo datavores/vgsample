@@ -1,0 +1,17 @@
+{
+    "contents" : "Package: vgsample\nType: Package\nTitle: A Representative Sample of Video Games\nVersion: 0.1\nDate: 2016-05-26\nAuthors@R: c(person(\"Waismeyer\", \"Brian\", role = c(\"aut\", \"cre\"),\n\t\t\t\t\temail = \"bwaismeyer@gmail.com\"),\n\t\t\t person(\"Coulter\", \"Sam\", role = \"ctb\",\n\t\t\t\t\temail = \"coulter.samantha@gmail.com\"),\n\t\t\t person(\"So\", \"Kameron\", role = \"ctb\",\n\t\t\t\t\temail = \"kamrons@gmail.com\"),\n\t\t\t person(\"Sousa\", \"Kate\", role = \"ctb\",\n\t\t\t        email = \"Ktevelynsousa@gmail.com\")\n\t\t\t)\nDescription: This package provides a representative sample of video games\n    stratified by first release year. It also includes the code used to produce\n    the sample along with descriptions of the data sources our team drew from,\n    our cleaning and sampling processes, and our rationale. In summary, our team\n    aggregrated four major public libraries of game data (GiantBomb, UVList,\n    MobyGames, and the now-defunct AllGames) and extracted a random sample of\n    games from each year of game data based on each game's initial release year.\n    This sample is designed to assist all parties interested in studying trends\n    in video games over time by providing a clean, manageable collection of\n    games to study which can be used to make inferences about the larger game\n    population.\nDepends:\n    R (>= 3.2.5)\nImports:\n    dplyr\nLicense: \nLazyData: TRUE\nURL: \nBugReports: \nRoxygenNote: 5.0.1\nSuggests: knitr,\n    rmarkdown\nVignetteBuilder: knitr\n",
+    "created" : 1464289019721.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "4258164656",
+    "id" : "FB592732",
+    "lastKnownWriteTime" : 1464293538,
+    "path" : "C:/Projects/vgsample/DESCRIPTION",
+    "project_path" : "DESCRIPTION",
+    "properties" : {
+    },
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "type" : "dcf"
+}
