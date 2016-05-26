@@ -57,7 +57,8 @@ study which can be used to make inferences about the larger game population.
 ### Where do I start?
 
 If you don't want to mess around with R, you can simply download the video game
-sample data and start reading the hosted PDFs.
+sample CSV (in the "data" folder) and start reading the documentation (in the
+"vignettes" folder - just click to view in your browser).
 
 If you're hungry for the R version:
 
